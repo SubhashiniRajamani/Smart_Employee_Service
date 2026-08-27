@@ -1,0 +1,1056 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: Smart Employee Onboarding and Identity Service
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - test
+      - prod
+
+Resources:
+
+  EmployeeDocumentsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub smart-employee-documents-${AWS::AccountId}-${Environment}
+
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - "*"
+            AllowedMethods:
+              - PUT
+              - GET
+            AllowedOrigins:
+              - "*"
+            MaxAge: 3600
+
+      Tags:
+        - Key: Project
+          Value: SmartEmployeeOnboarding
+        - Key: Environment
+          Value: !Ref Environment
+
+  OnboardingStageLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub smart-onboarding-stage-role-${Environment}
+
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+      Policies:
+        - PolicyName: OnboardingStageDynamoDBPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:GetItem
+                Resource: !GetAtt EmployeeOnboardingTable.Arn
+
+  OnboardingStageFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub smart-onboarding-stage-${Environment}
+
+      Runtime: python3.12
+
+      Handler: app.lambda_handler
+
+      Role: !GetAtt OnboardingStageLambdaRole.Arn
+
+      Timeout: 10
+
+      MemorySize: 128
+
+      Environment:
+        Variables:
+          EMPLOYEE_TABLE_NAME: !Ref EmployeeOnboardingTable
+          HR_NOTIFICATION_TOPIC_ARN: !Ref HRNotificationTopic
+
+      Code:
+        ZipFile: |
+          def lambda_handler(event, context):
+              return {
+                  "employee_id": event.get("employee_id"),
+                  "stage": event.get("stage"),
+                  "stage_status": "IN_PROGRESS"
+              }
+
+      Tags:
+        - Key: Project
+          Value: SmartEmployeeOnboarding
+        - Key: Environment
+          Value: !Ref Environment
+
+  EmployeeHttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub smart-employee-api-${Environment}
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins:
+          - "*"
+        AllowMethods:
+          - POST
+          - GET
+          - OPTIONS
+        AllowHeaders:
+          - Content-Type
+          - Authorization
+
+
+  CreateEmployeeIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref EmployeeHttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt CreateEmployeeFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+
+  CreateEmployeeRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref EmployeeHttpApi
+      RouteKey: "POST /employees"
+      Target: !Sub integrations/${CreateEmployeeIntegration}
+
+
+  EmployeeApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref EmployeeHttpApi
+      StageName: "$default"
+      AutoDeploy: true
+
+
+  ApiGatewayLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CreateEmployeeFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${EmployeeHttpApi}/*
+
+  EmployeeOnboardingTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub smart-employee-onboarding-${Environment}
+
+      BillingMode: PAY_PER_REQUEST
+
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+
+      SSESpecification:
+        SSEEnabled: true
+
+      Tags:
+        - Key: Project
+          Value: SmartEmployeeOnboarding
+        - Key: Environment
+          Value: !Ref Environment
+
+  OnboardingStateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub smart-onboarding-state-machine-role-${Environment}
+
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - states.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+      Policies:
+        - PolicyName: InvokeOnboardingLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt OnboardingStageFunction.Arn
+
+  EmployeeOnboardingStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+
+    Properties:
+
+      StateMachineName: !Sub smart-employee-onboarding-${Environment}
+
+      StateMachineType: STANDARD
+
+      RoleArn: !GetAtt OnboardingStateMachineRole.Arn
+
+      Definition:
+        Comment: Smart Employee Onboarding Workflow
+
+        StartAt: DocumentCollection
+
+        States:
+
+          DocumentCollection:
+            Type: Task
+            Resource: !GetAtt OnboardingStageFunction.Arn
+
+            Parameters:
+              employee_id.$: $.employee_id
+              stage: DOCUMENTS
+
+            Next: WaitForITProvisioning
+
+
+          WaitForITProvisioning:
+            Type: Wait
+            Seconds: 10
+            Next: ITProvisioning
+
+
+          ITProvisioning:
+            Type: Task
+            Resource: !GetAtt OnboardingStageFunction.Arn
+
+            Parameters:
+              employee_id.$: $.employee_id
+              stage: IT
+
+            Next: WaitForPolicy
+
+
+          WaitForPolicy:
+            Type: Wait
+            Seconds: 10
+            Next: PolicySignoff
+
+
+          PolicySignoff:
+            Type: Task
+            Resource: !GetAtt OnboardingStageFunction.Arn
+
+            Parameters:
+              employee_id.$: $.employee_id
+              stage: POLICY
+
+            Next: WaitForManager
+
+
+          WaitForManager:
+            Type: Wait
+            Seconds: 10
+            Next: ManagerIntroduction
+
+
+          ManagerIntroduction:
+            Type: Task
+            Resource: !GetAtt OnboardingStageFunction.Arn
+
+            Parameters:
+              employee_id.$: $.employee_id
+              stage: MANAGER
+
+            End: true
+
+
+  CreateEmployeeLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub smart-employee-create-role-${Environment}
+
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+      Policies:
+        - PolicyName: DynamoDBEmployeeWritePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt EmployeeOnboardingTable.Arn
+
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref HRNotificationTopic
+
+              - Effect: Allow
+                Action:
+                  - cognito-idp:AdminCreateUser
+                Resource: !GetAtt EmployeeUserPool.Arn
+
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource: !Ref EmployeeOnboardingStateMachine
+
+
+
+  EmployeeUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub smart-employee-user-pool-${Environment}
+
+      UsernameAttributes:
+        - email
+
+      AutoVerifiedAttributes:
+        - email
+
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+
+
+  EmployeeUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub smart-employee-client-${Environment}
+      UserPoolId: !Ref EmployeeUserPool
+      GenerateSecret: false
+
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+
+
+  CreateEmployeeFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub smart-employee-create-${Environment}
+
+      Runtime: python3.12
+      Handler: app.lambda_handler
+
+      Role: !GetAtt CreateEmployeeLambdaRole.Arn
+
+      Timeout: 10
+      MemorySize: 128
+
+      Environment:
+        Variables:
+          EMPLOYEE_TABLE_NAME: !Ref EmployeeOnboardingTable
+          USER_POOL_ID: !Ref EmployeeUserPool
+          STATE_MACHINE_ARN: !Ref EmployeeOnboardingStateMachine
+
+      Code:
+        ZipFile: |
+          import json
+
+          def lambda_handler(event, context):
+              return {
+                  "statusCode": 200,
+                  "body": json.dumps({
+                      "message": "Temporary deployment"
+                  })
+              }
+
+      Tags:
+        - Key: Project
+          Value: SmartEmployeeOnboarding
+        - Key: Environment
+          Value: !Ref Environment
+
+
+
+  GenerateUploadUrlLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub smart-upload-url-role-${Environment}
+
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+      Policies:
+        - PolicyName: GeneratePresignedUploadPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub ${EmployeeDocumentsBucket.Arn}/*
+
+
+
+  GenerateUploadUrlFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub smart-generate-upload-url-${Environment}
+
+      Runtime: python3.12
+      Handler: app.lambda_handler
+
+      Role: !GetAtt GenerateUploadUrlLambdaRole.Arn
+
+      Timeout: 10
+      MemorySize: 128
+
+      Environment:
+        Variables:
+          DOCUMENT_BUCKET_NAME: !Ref EmployeeDocumentsBucket
+
+      Code:
+        ZipFile: |
+          def lambda_handler(event, context):
+              return {
+                  "statusCode": 200,
+                  "body": "Temporary deployment"
+              }
+
+      Tags:
+        - Key: Project
+          Value: SmartEmployeeOnboarding
+        - Key: Environment
+          Value: !Ref Environment
+
+
+
+  UploadUrlIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref EmployeeHttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt GenerateUploadUrlFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+
+  UploadUrlRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref EmployeeHttpApi
+      RouteKey: "POST /upload-url"
+      Target: !Sub integrations/${UploadUrlIntegration}
+
+
+  UploadUrlLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref GenerateUploadUrlFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${EmployeeHttpApi}/*
+
+
+
+
+
+  GetProgressLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub smart-get-progress-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: GetProgressPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                Resource: !GetAtt EmployeeOnboardingTable.Arn
+
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+  ValidateDocumentLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub smart-validate-document-role-${Environment}
+
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+      Policies:
+        - PolicyName: ValidateDocumentPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub ${EmployeeDocumentsBucket.Arn}/*
+
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt EmployeeOnboardingTable.Arn
+
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref HRNotificationTopic
+
+
+
+  GetProgressFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub smart-get-progress-${Environment}
+      Runtime: python3.12
+      Handler: app.lambda_handler
+      Role: !GetAtt GetProgressLambdaRole.Arn
+      Timeout: 10
+      Environment:
+        Variables:
+          EMPLOYEE_TABLE_NAME: !Ref EmployeeOnboardingTable
+      Code:
+        ZipFile: |
+          def lambda_handler(event, context):
+              return {
+                  "statusCode": 200,
+                  "body": "Temporary GetProgress deployment"
+              }
+
+  ValidateDocumentFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub smart-validate-document-${Environment}
+
+      Runtime: python3.12
+      Handler: app.lambda_handler
+
+      Role: !GetAtt ValidateDocumentLambdaRole.Arn
+
+      Timeout: 15
+      MemorySize: 128
+
+      Environment:
+        Variables:
+          EMPLOYEE_TABLE_NAME: !Ref EmployeeOnboardingTable
+          HR_NOTIFICATION_TOPIC_ARN: !Ref HRNotificationTopic
+
+      Code:
+        ZipFile: |
+          def lambda_handler(event, context):
+              print("Temporary validation Lambda")
+              return {
+                  "statusCode": 200
+              }
+
+      Tags:
+        - Key: Project
+          Value: SmartEmployeeOnboarding
+        - Key: Environment
+          Value: !Ref Environment
+
+
+  ValidateDocumentS3Permission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ValidateDocumentFunction
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !GetAtt EmployeeDocumentsBucket.Arn
+
+
+
+  HRNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub smart-hr-onboarding-${Environment}
+
+
+
+  GetProgressIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref EmployeeHttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt GetProgressFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+
+  GetProgressRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref EmployeeHttpApi
+      RouteKey: "GET /employees/{employee_id}/progress"
+      Target: !Sub integrations/${GetProgressIntegration}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref EmployeeJwtAuthorizer
+
+
+  GetProgressApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref GetProgressFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${EmployeeHttpApi}/*
+
+
+  CheckStageStatusLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub smart-check-stage-status-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: CheckStageStatusPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource: !GetAtt EmployeeOnboardingTable.Arn
+
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+  CheckStageStatusFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub smart-check-stage-status-${Environment}
+      Runtime: python3.12
+      Handler: app.lambda_handler
+      Role: !GetAtt CheckStageStatusLambdaRole.Arn
+      Timeout: 10
+      Environment:
+        Variables:
+          EMPLOYEE_TABLE_NAME: !Ref EmployeeOnboardingTable
+      Code:
+        ZipFile: |
+          def lambda_handler(event, context):
+              return {
+                  "employee_id": event.get("employee_id"),
+                  "stage": event.get("stage"),
+                  "status": "TEMPORARY"
+              }
+
+  SendReminderLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub smart-send-reminder-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: SendReminderPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref HRNotificationTopic
+
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+  SendReminderFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub smart-send-reminder-${Environment}
+      Runtime: python3.12
+      Handler: app.lambda_handler
+      Role: !GetAtt SendReminderLambdaRole.Arn
+      Timeout: 10
+      Environment:
+        Variables:
+          HR_NOTIFICATION_TOPIC_ARN: !Ref HRNotificationTopic
+      Code:
+        ZipFile: |
+          def lambda_handler(event, context):
+              return {
+                  "employee_id": event.get("employee_id"),
+                  "stage": event.get("stage"),
+                  "reminder_sent": False
+              }
+
+
+
+  CompleteOnboardingLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub smart-complete-onboarding-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: CompleteOnboardingPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt EmployeeOnboardingTable.Arn
+
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+  CompleteOnboardingFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub smart-complete-onboarding-${Environment}
+      Runtime: python3.12
+      Handler: app.lambda_handler
+      Role: !GetAtt CompleteOnboardingLambdaRole.Arn
+      Timeout: 10
+      Environment:
+        Variables:
+          EMPLOYEE_TABLE_NAME: !Ref EmployeeOnboardingTable
+      Code:
+        ZipFile: |
+          def lambda_handler(event, context):
+              return {
+                  "employee_id": event.get("employee_id"),
+                  "overall_status": "TEMPORARY"
+              }
+
+
+
+  CompleteStageLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub smart-complete-stage-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: CompleteStagePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt EmployeeOnboardingTable.Arn
+
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+  CompleteStageFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub smart-complete-stage-${Environment}
+      Runtime: python3.12
+      Handler: app.lambda_handler
+      Role: !GetAtt CompleteStageLambdaRole.Arn
+      Timeout: 10
+      Environment:
+        Variables:
+          EMPLOYEE_TABLE_NAME: !Ref EmployeeOnboardingTable
+      Code:
+        ZipFile: |
+          def lambda_handler(event, context):
+              return {
+                  "statusCode": 200,
+                  "body": "Temporary CompleteStage deployment"
+              }
+
+  CompleteStageIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref EmployeeHttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt CompleteStageFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  CompleteStageRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref EmployeeHttpApi
+      RouteKey: "POST /employees/{employee_id}/stages/{stage}/complete"
+      Target: !Sub integrations/${CompleteStageIntegration}
+      AuthorizationType: JWT
+      AuthorizerId: !Ref EmployeeJwtAuthorizer
+
+  CompleteStageApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CompleteStageFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${EmployeeHttpApi}/*
+
+
+
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub smart-employee-frontend-${AWS::AccountId}-${Environment}
+
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        IgnorePublicAcls: false
+        BlockPublicPolicy: false
+        RestrictPublicBuckets: false
+
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: PublicReadForWebsite
+            Effect: Allow
+            Principal: "*"
+            Action:
+              - s3:GetObject
+            Resource: !Sub ${FrontendBucket.Arn}/*
+
+
+
+  FrontendCloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+
+        Origins:
+          - Id: FrontendS3WebsiteOrigin
+            DomainName: !Sub ${FrontendBucket}.s3-website.${AWS::Region}.amazonaws.com
+            CustomOriginConfig:
+              HTTPPort: 80
+              HTTPSPort: 443
+              OriginProtocolPolicy: http-only
+
+        DefaultCacheBehavior:
+          TargetOriginId: FrontendS3WebsiteOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+
+
+
+  EmployeeJwtAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref EmployeeHttpApi
+      AuthorizerType: JWT
+      IdentitySource:
+        - "$request.header.Authorization"
+      JwtConfiguration:
+        Audience:
+          - "25h8kd74jg20u2pfvvmoojj6os"
+        Issuer: "https://cognito-idp.ap-south-1.amazonaws.com/ap-south-1_b4Hhj4rL4"
+      Name: smart-employee-jwt-authorizer
+
+
+Outputs:
+
+  EmployeeApiUrl:
+    Description: HTTP API endpoint
+    Value: !GetAtt EmployeeHttpApi.ApiEndpoint
+
+  EmployeeOnboardingTableName:
+    Description: DynamoDB table used by employee onboarding
+    Value: !Ref EmployeeOnboardingTable
+
+  EmployeeOnboardingTableArn:
+    Description: DynamoDB table ARN
+    Value: !GetAtt EmployeeOnboardingTable.Arn
+
+  CreateEmployeeFunctionName:
+    Description: Create Employee Lambda function name
+    Value: !Ref CreateEmployeeFunction
+
+  CreateEmployeeFunctionArn:
+    Description: Create Employee Lambda function ARN
+    Value: !GetAtt CreateEmployeeFunction.Arn
+
+  EmployeeUserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref EmployeeUserPool
+
+  EmployeeUserPoolClientId:
+    Description: Cognito App Client ID
+    Value: !Ref EmployeeUserPoolClient
+
+  EmployeeOnboardingStateMachineArn:
+    Description: Employee onboarding Step Functions ARN
+    Value: !Ref EmployeeOnboardingStateMachine
+
+  EmployeeDocumentsBucketName:
+    Description: Employee onboarding document bucket
+    Value: !Ref EmployeeDocumentsBucket
+
+
+  GenerateUploadUrlFunctionName:
+    Description: Upload URL Lambda function name
+    Value: !Ref GenerateUploadUrlFunction
+
+  ValidateDocumentFunctionName:
+    Description: Validate Document Lambda
+    Value: !Ref ValidateDocumentFunction
+
+  HRNotificationTopicArn:
+    Description: HR onboarding SNS topic ARN
+    Value: !Ref HRNotificationTopic
+
+
+  FrontendCloudFrontUrl:
+    Description: CloudFront HTTPS frontend URL
+    Value: !Sub https://${FrontendCloudFrontDistribution.DomainName}
+

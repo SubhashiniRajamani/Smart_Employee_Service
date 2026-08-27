@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HR Onboarding Dashboard</title>
+
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #f4f6f8;
+      margin: 0;
+      padding: 30px;
+    }
+
+    .container {
+      max-width: 900px;
+      margin: auto;
+      background: white;
+      padding: 30px;
+      border-radius: 10px;
+    }
+
+    .stage {
+      padding: 15px;
+      margin: 10px 0;
+      border-radius: 6px;
+      background: #eee;
+    }
+
+    .complete {
+      background: #d4edda;
+    }
+
+    .in-progress {
+      background: #fff3cd;
+    }
+
+    .not-started {
+      background: #f8d7da;
+    }
+
+    button {
+      padding: 10px 15px;
+      margin-top: 10px;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+  </style>
+</head>
+
+<body>
+
+<div class="container">
+
+  <h1>HR Onboarding Dashboard</h1>
+
+  <p id="employeeName"></p>
+  <p id="overallStatus"></p>
+
+  <h2>Onboarding Stages</h2>
+
+  <div id="stages"></div>
+
+</div>
+
+<script src="hr.js"></script>
+
+</body>
+</html>

@@ -1,0 +1,268 @@
+{
+  "Comment": "Smart Employee Onboarding Workflow",
+  "StartAt": "CheckDocuments",
+  "States": {
+    "CheckDocuments": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:ap-south-1:322824641104:function:smart-check-stage-status-dev",
+        "Payload": {
+          "employee_id.$": "$.employee_id",
+          "stage": "DOCUMENTS"
+        }
+      },
+      "ResultSelector": {
+        "employee_id.$": "$.Payload.employee_id",
+        "stage.$": "$.Payload.stage",
+        "status.$": "$.Payload.status"
+      },
+      "ResultPath": "$.stage_check",
+      "Next": "AreDocumentsComplete"
+    },
+
+    "AreDocumentsComplete": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.stage_check.status",
+          "StringEquals": "COMPLETE",
+          "Next": "ITProvisioning"
+        }
+      ],
+      "Default": "WaitForDocuments"
+    },
+
+    "WaitForDocuments": {
+      "Type": "Wait",
+      "Seconds": 60,
+      "Next": "SendDocumentsReminder"
+    },
+
+    "SendDocumentsReminder": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:ap-south-1:322824641104:function:smart-send-reminder-dev",
+        "Payload": {
+          "employee_id.$": "$.employee_id",
+          "stage": "DOCUMENTS"
+        }
+      },
+      "ResultPath": "$.reminder",
+      "Next": "CheckDocuments"
+    },
+
+    "ITProvisioning": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:ap-south-1:322824641104:function:smart-onboarding-stage-dev",
+        "Payload": {
+          "employee_id.$": "$.employee_id",
+          "stage": "IT_PROVISIONING"
+        }
+      },
+      "ResultPath": "$.it_result",
+      "Next": "CheckITProvisioning"
+    },
+
+    "CheckITProvisioning": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:ap-south-1:322824641104:function:smart-check-stage-status-dev",
+        "Payload": {
+          "employee_id.$": "$.employee_id",
+          "stage": "IT_PROVISIONING"
+        }
+      },
+      "ResultSelector": {
+        "employee_id.$": "$.Payload.employee_id",
+        "stage.$": "$.Payload.stage",
+        "status.$": "$.Payload.status"
+      },
+      "ResultPath": "$.stage_check",
+      "Next": "IsITComplete"
+    },
+
+    "IsITComplete": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.stage_check.status",
+          "StringEquals": "COMPLETE",
+          "Next": "PolicySignoff"
+        }
+      ],
+      "Default": "WaitForIT"
+    },
+
+    "WaitForIT": {
+      "Type": "Wait",
+      "Seconds": 60,
+      "Next": "SendITReminder"
+    },
+
+    "SendITReminder": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:ap-south-1:322824641104:function:smart-send-reminder-dev",
+        "Payload": {
+          "employee_id.$": "$.employee_id",
+          "stage": "IT_PROVISIONING"
+        }
+      },
+      "ResultPath": "$.reminder",
+      "Next": "CheckITProvisioning"
+    },
+
+    "PolicySignoff": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:ap-south-1:322824641104:function:smart-onboarding-stage-dev",
+        "Payload": {
+          "employee_id.$": "$.employee_id",
+          "stage": "POLICY_SIGNOFF"
+        }
+      },
+      "ResultPath": "$.policy_result",
+      "Next": "CheckPolicySignoff"
+    },
+
+    "CheckPolicySignoff": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:ap-south-1:322824641104:function:smart-check-stage-status-dev",
+        "Payload": {
+          "employee_id.$": "$.employee_id",
+          "stage": "POLICY_SIGNOFF"
+        }
+      },
+      "ResultSelector": {
+        "employee_id.$": "$.Payload.employee_id",
+        "stage.$": "$.Payload.stage",
+        "status.$": "$.Payload.status"
+      },
+      "ResultPath": "$.stage_check",
+      "Next": "IsPolicyComplete"
+    },
+
+    "IsPolicyComplete": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.stage_check.status",
+          "StringEquals": "COMPLETE",
+          "Next": "ManagerIntroduction"
+        }
+      ],
+      "Default": "WaitForPolicy"
+    },
+
+    "WaitForPolicy": {
+      "Type": "Wait",
+      "Seconds": 60,
+      "Next": "SendPolicyReminder"
+    },
+
+    "SendPolicyReminder": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:ap-south-1:322824641104:function:smart-send-reminder-dev",
+        "Payload": {
+          "employee_id.$": "$.employee_id",
+          "stage": "POLICY_SIGNOFF"
+        }
+      },
+      "ResultPath": "$.reminder",
+      "Next": "CheckPolicySignoff"
+    },
+
+    "ManagerIntroduction": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:ap-south-1:322824641104:function:smart-onboarding-stage-dev",
+        "Payload": {
+          "employee_id.$": "$.employee_id",
+          "stage": "MANAGER_INTRO"
+        }
+      },
+      "ResultPath": "$.manager_result",
+      "Next": "CheckManagerIntro"
+    },
+
+    "CheckManagerIntro": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:ap-south-1:322824641104:function:smart-check-stage-status-dev",
+        "Payload": {
+          "employee_id.$": "$.employee_id",
+          "stage": "MANAGER_INTRO"
+        }
+      },
+      "ResultSelector": {
+        "employee_id.$": "$.Payload.employee_id",
+        "stage.$": "$.Payload.stage",
+        "status.$": "$.Payload.status"
+      },
+      "ResultPath": "$.stage_check",
+      "Next": "IsManagerIntroComplete"
+    },
+
+    "IsManagerIntroComplete": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.stage_check.status",
+          "StringEquals": "COMPLETE",
+          "Next": "UpdateEmployeeComplete"
+        }
+      ],
+      "Default": "WaitForManager"
+    },
+
+    "WaitForManager": {
+      "Type": "Wait",
+      "Seconds": 60,
+      "Next": "SendManagerReminder"
+    },
+
+    "SendManagerReminder": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:ap-south-1:322824641104:function:smart-send-reminder-dev",
+        "Payload": {
+          "employee_id.$": "$.employee_id",
+          "stage": "MANAGER_INTRO"
+        }
+      },
+      "ResultPath": "$.reminder",
+      "Next": "CheckManagerIntro"
+    },
+
+    "UpdateEmployeeComplete": {
+  "Type": "Task",
+  "Resource": "arn:aws:states:::lambda:invoke",
+  "Parameters": {
+    "FunctionName": "arn:aws:lambda:ap-south-1:322824641104:function:smart-complete-onboarding-dev",
+    "Payload": {
+      "employee_id.$": "$.employee_id"
+    }
+  },
+  "ResultPath": "$.completion_result",
+  "Next": "OnboardingComplete"
+},
+
+"OnboardingComplete": {
+  "Type": "Succeed"
+}
+  }
+}

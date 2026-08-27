@@ -1,0 +1,10 @@
+{
+  "first_name": "Subhashini",
+  "last_name": "Test",
+  "email": "subhashini.test@example.com",
+  "department": "Engineering",
+  "role": "AWS Cloud Engineer",
+  "manager": "Priya Sharma",
+  "joining_date": "2026-09-01",
+  "employment_type": "FULL_TIME"
+}
